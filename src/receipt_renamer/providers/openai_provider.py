@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
-import base64
 import os
 
-from .base import (
-    SYSTEM_PROMPT,
-    USER_PROMPT,
-    ProviderError,
-    RawExtraction,
-    build_extraction,
-    parse_json_response,
-)
+from ._openai_common import chat_extract
+from .base import ProviderError, RawExtraction
 
 DEFAULT_MODEL = "gpt-4o-mini"
 
 
 class OpenAIProvider:
-    """Vision extraction via the OpenAI Chat Completions API."""
+    """Vision extraction via the OpenAI Chat Completions API.
+
+    The endpoint comes from the SDK: ``OPENAI_BASE_URL`` when set, otherwise
+    ``https://api.openai.com/v1``. Pass ``base_url`` to target a compatible gateway.
+    For Azure-hosted models use the ``azure`` provider instead.
+    """
 
     name = "openai"
 
@@ -27,6 +25,7 @@ class OpenAIProvider:
         model: str | None = None,
         api_key: str | None = None,
         *,
+        base_url: str | None = None,
         timeout: float = 60.0,
         max_retries: int = 2,
     ) -> None:
@@ -43,30 +42,22 @@ class OpenAIProvider:
                 "The openai package is required for --provider openai. "
                 "Install it with: pip install 'receipt-renamer[openai]'"
             ) from exc
-        self._client = OpenAI(api_key=key, timeout=timeout, max_retries=max_retries)
+        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        kwargs: dict[str, object] = {
+            "api_key": key,
+            "timeout": timeout,
+            "max_retries": max_retries,
+        }
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        self._client = OpenAI(**kwargs)  # type: ignore[arg-type]
 
     def extract(self, image_bytes: bytes, *, mime_type: str = "image/jpeg") -> RawExtraction:
-        data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-        try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                temperature=0,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": USER_PROMPT},
-                            {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
-                        ],
-                    },
-                ],
-            )
-        except Exception as exc:  # noqa: BLE001 - surface any SDK/transport failure uniformly
-            raise ProviderError(f"OpenAI request failed: {exc}") from exc
-
-        text = (response.choices[0].message.content or "") if response.choices else ""
-        return build_extraction(
-            parse_json_response(text), provider=self.name, model=self.model, raw=text
+        return chat_extract(
+            self._client,
+            model=self.model,
+            provider_name=self.name,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            label="OpenAI",
         )

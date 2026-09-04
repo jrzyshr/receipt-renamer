@@ -12,7 +12,7 @@ from .base import (
     parse_json_response,
 )
 
-PROVIDER_NAMES = ("openai", "anthropic", "fake")
+PROVIDER_NAMES = ("openai", "azure", "anthropic", "fake")
 DEFAULT_PROVIDER = "openai"
 
 __all__ = [
@@ -45,6 +45,10 @@ def get_provider(name: str | None = None, model: str | None = None) -> VisionPro
         from .openai_provider import OpenAIProvider
 
         return OpenAIProvider(model=model)
+    if resolved == "azure":
+        from .azure_provider import AzureOpenAIProvider
+
+        return AzureOpenAIProvider(model=model)
     if resolved == "anthropic":
         from .anthropic_provider import AnthropicProvider
 

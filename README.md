@@ -33,6 +33,8 @@ Optional extras:
 | Extra | Gives you |
 | --- | --- |
 | `openai` | OpenAI provider (`gpt-4o-mini`, `gpt-4o`) |
+| `azure` | Azure OpenAI provider (API-key auth) |
+| `azure-entra` | Azure OpenAI provider + Microsoft Entra ID auth (`azure-identity`) |
 | `anthropic` | Anthropic provider (Claude) |
 | `heic` | iPhone `.heic` / `.heif` input (`pillow-heif`) |
 | `pdf` | Single-page PDF input (`pdf2image`, needs poppler) |
@@ -44,21 +46,86 @@ Verify:
 receipt-renamer --version
 ```
 
-## API keys
+## Providers and credentials
 
-Keys are read from the environment. Nothing is ever written to disk by this tool.
+Credentials are read from the environment. Nothing is ever written to disk by this tool.
+`config.load_env()` loads a `.env` from your working directory at startup (see
+`.env.example`, and note that `.env` is already gitignored). **Exported variables always win
+over `.env`.**
+
+Choose a provider with `--provider` or `RECEIPT_RENAMER_PROVIDER`. Default is
+`openai` / `gpt-4o-mini`.
+
+### OpenAI
 
 ```bash
 export OPENAI_API_KEY=sk-...
-# or
-export ANTHROPIC_API_KEY=sk-ant-...
+receipt-renamer run --input ~/Scans/Inbox
 ```
 
-Or copy `.env.example` to `.env` in your working directory — it is loaded automatically via
-python-dotenv and is already in `.gitignore`. Exported variables always win over `.env`.
+The endpoint is resolved by the SDK: `OPENAI_BASE_URL` if you set it, otherwise
+`https://api.openai.com/v1`. That is enough to point at an OpenAI-compatible gateway
+(LiteLLM, vLLM, Ollama). For **Azure**, use the dedicated provider below — Azure is not
+wire-compatible with a plain base-URL swap.
 
-Pick a provider with `--provider openai|anthropic` or by setting
-`RECEIPT_RENAMER_PROVIDER`. Default is `openai` / `gpt-4o-mini`.
+### Azure OpenAI
+
+Azure differs from the public API in three ways the tool handles for you:
+
+- the endpoint is your own resource, `https://<resource>.openai.azure.com`
+- **`--model` is the deployment name** you chose in the portal, not `gpt-4o-mini`
+- requests are pinned to an `api-version` (default `2024-10-21`, a GA version that
+  supports vision input and JSON mode)
+
+```bash
+pip install -e ".[azure]"
+
+export AZURE_OPENAI_ENDPOINT=https://my-resource.openai.azure.com
+export AZURE_OPENAI_DEPLOYMENT=receipts-4o-mini    # your deployment name
+export AZURE_OPENAI_API_KEY=...                    # or use Entra ID, below
+
+receipt-renamer run --input ~/Scans/Inbox --provider azure
+```
+
+Or set `RECEIPT_RENAMER_PROVIDER=azure` in `.env` and drop the flag. The startup banner
+echoes the resolved endpoint, deployment and auth mode so a misconfiguration is obvious
+before you spend money:
+
+```
+Scanning /Users/me/Scans/Inbox with azure/receipts-4o-mini @ https://my-resource.openai.azure.com (api-key)
+```
+
+**Entra ID (keyless) auth.** Leave `AZURE_OPENAI_API_KEY` unset and the tool falls back to
+`DefaultAzureCredential`, which picks up `az login`, a managed identity, or a service
+principal:
+
+```bash
+pip install -e ".[azure-entra]"
+az login
+receipt-renamer run --input ~/Scans/Inbox --provider azure
+```
+
+Your identity needs the **Cognitive Services OpenAI User** role on the resource.
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `AZURE_OPENAI_ENDPOINT` | yes | A full request URL pasted from the portal is fine — it gets trimmed back to the resource root |
+| `AZURE_OPENAI_DEPLOYMENT` | yes | Or pass `--model <deployment>` |
+| `AZURE_OPENAI_API_KEY` | no | Omit to authenticate with Entra ID |
+| `AZURE_OPENAI_API_VERSION` | no | Defaults to `2024-10-21` |
+
+Deploy a **vision-capable** model (`gpt-4o-mini` or `gpt-4o`); a text-only deployment will
+fail on the image content block.
+
+### Anthropic
+
+```bash
+pip install -e ".[anthropic]"
+export ANTHROPIC_API_KEY=sk-ant-...
+receipt-renamer run --input ~/Scans/Inbox --provider anthropic
+```
+
+`ANTHROPIC_BASE_URL` is honoured by that SDK in the same way.
 
 ## Scanner workflow tips
 
@@ -109,7 +176,9 @@ receipt-renamer run --input ~/Scans/Inbox --in-place --apply
 receipt-renamer run --input ~/Scans --output ~/Receipts/2024 --recursive \
                     --min-confidence 0.85 --apply
 
-# use Claude, or a stronger OpenAI model for a difficult batch
+# use Azure, Claude, or a stronger OpenAI model for a difficult batch
+receipt-renamer run --input ~/Scans/Inbox --provider azure --apply
+receipt-renamer run --input ~/Scans/Inbox --provider azure --model receipts-4o --apply
 receipt-renamer run --input ~/Scans/Inbox --provider anthropic --apply
 receipt-renamer run --input ~/Scans/Inbox --model gpt-4o --apply
 ```
@@ -122,8 +191,8 @@ receipt-renamer run --input ~/Scans/Inbox --model gpt-4o --apply
 | `--dry-run` | on | Explicitly force a dry run |
 | `--in-place` | off | Rename within the input folder |
 | `--recursive, -r` | off | Include subfolders |
-| `--provider, -p` | `openai` | `openai`, `anthropic`, or `fake` |
-| `--model` | provider default | e.g. `gpt-4o` |
+| `--provider, -p` | `openai` | `openai`, `azure`, `anthropic`, or `fake` |
+| `--model` | provider default | e.g. `gpt-4o`; for `azure` this is the **deployment name** |
 | `--min-confidence` | `0.7` | Below this → `Needs Review/` |
 | `--max-edge` | `2000` | Downscale long edge (px) before upload |
 | `--quality` | `85` | JPEG quality for the uploaded copy |
@@ -194,8 +263,15 @@ tokens plus a ~300-token prompt and a tiny JSON response.
 
 With **gpt-4o-mini** that works out to well under a cent per receipt — on the order of
 **$0.20–0.60 per 1,000 receipts** at current pricing. **gpt-4o** and **Claude Sonnet** are
-roughly 15–20× that, so keep them for the batches `gpt-4o-mini` struggles with. Always sanity
-check against your provider's current price list; do a `--dry-run` first if the batch is huge.
+roughly 15–20× that, so keep them for the batches `gpt-4o-mini` struggles with.
+
+**Azure OpenAI** is billed per-token on the same basis, at your resource's regional rate
+rather than the public list price — check the Azure pricing page (or your EA/MACC terms) for
+the deployed model and region, and watch your deployment's TPM quota on large batches, since
+throttling shows up as retries rather than errors.
+
+Always sanity check against your provider's current price list; do a `--dry-run` first if the
+batch is huge.
 
 ## Development
 

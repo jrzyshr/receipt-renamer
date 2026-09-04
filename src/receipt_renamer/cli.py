@@ -94,6 +94,18 @@ def _get_provider_or_exit(name: str, model: Optional[str]):
         raise typer.Exit(code=2) from exc
 
 
+def _provider_banner(provider_name: str, vision) -> str:
+    """Describe the active provider, including Azure endpoint and auth mode."""
+    banner = f"[bold]{provider_name}[/bold]/[bold]{vision.model}[/bold]"
+    endpoint = getattr(vision, "endpoint", None) or getattr(vision, "base_url", None)
+    if endpoint:
+        banner += f" @ {endpoint}"
+    auth = getattr(vision, "auth", None)
+    if auth:
+        banner += f" [dim]({auth})[/dim]"
+    return banner
+
+
 def _result_row(result: FileResult) -> tuple[str, str, str, str]:
     if result.outcome == "renamed":
         assert result.destination is not None
@@ -162,9 +174,16 @@ def run(
         False, "--in-place", help="Rename inside the input folder instead of moving to an output folder."
     ),
     provider: Optional[str] = typer.Option(
-        None, "--provider", "-p", help="openai | anthropic | fake (env: RECEIPT_RENAMER_PROVIDER)."
+        None,
+        "--provider",
+        "-p",
+        help="openai | azure | anthropic | fake (env: RECEIPT_RENAMER_PROVIDER).",
     ),
-    model: Optional[str] = typer.Option(None, "--model", help="Override the provider's default model."),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        help="Override the model. For --provider azure this is the DEPLOYMENT name.",
+    ),
     min_confidence: float = typer.Option(
         DEFAULT_MIN_CONFIDENCE, "--min-confidence", help="Below this, files go to Needs Review."
     ),
@@ -193,7 +212,7 @@ def run(
 
     console.print(
         f"Scanning [bold]{settings.input_dir}[/bold] with "
-        f"[bold]{provider_name}[/bold]/[bold]{vision.model}[/bold]"
+        + _provider_banner(provider_name, vision)
         + (" [cyan](dry run)[/cyan]" if is_dry_run else "")
     )
     with console.status("Reading receipts..."):
@@ -213,8 +232,14 @@ def watch(
     ),
     recursive: bool = typer.Option(False, "--recursive", "-r", help="Watch subfolders too."),
     in_place: bool = typer.Option(False, "--in-place", help="Rename inside the watched folder."),
-    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="openai | anthropic | fake."),
-    model: Optional[str] = typer.Option(None, "--model", help="Override the provider's default model."),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p", help="openai | azure | anthropic | fake."
+    ),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        help="Override the model. For --provider azure this is the DEPLOYMENT name.",
+    ),
     min_confidence: float = typer.Option(
         DEFAULT_MIN_CONFIDENCE, "--min-confidence", help="Below this, files go to Needs Review."
     ),
@@ -252,8 +277,9 @@ def watch(
         console.print(f"[{style}]{outcome:>12}[/{style}]  {original} → {target}  {detail}")
 
     console.print(
-        f"Watching [bold]{settings.input_dir}[/bold] "
-        f"({provider_name}/{vision.model}, debounce {debounce}s)"
+        f"Watching [bold]{settings.input_dir}[/bold] with "
+        + _provider_banner(provider_name, vision)
+        + f" [dim]debounce {debounce}s[/dim]"
         + (" [cyan](dry run)[/cyan]" if dry_run else "")
     )
     console.print("[dim]Press Ctrl-C to stop.[/dim]")

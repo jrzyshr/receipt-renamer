@@ -7,11 +7,14 @@
 .receipt-renamer-log.jsonl
 *.receipt-renamer-log.jsonl
 
-# Scans / working folders
+# Scans / working folders - never commit real receipts
 Renamed/
 Needs Review/
 scans/
 samples/
+ReceiptInbox*/
+*Receipts*/
+*Inbox*/
 
 # Python
 __pycache__/
