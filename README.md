@@ -25,7 +25,10 @@ cd receipt-renamer
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-pip install -e ".[openai]"         # or ".[anthropic]", or ".[openai,anthropic]"
+# pick the provider(s) you use - extras are additive
+pip install -e ".[openai]"         # public OpenAI
+pip install -e ".[azure]"          # Azure OpenAI
+pip install -e ".[anthropic]"      # Claude
 ```
 
 Optional extras:
@@ -55,6 +58,15 @@ over `.env`.**
 
 Choose a provider with `--provider` or `RECEIPT_RENAMER_PROVIDER`. Default is
 `openai` / `gpt-4o-mini`.
+
+Two variables apply to every provider:
+
+| Variable | Meaning |
+| --- | --- |
+| `RECEIPT_RENAMER_PROVIDER` | `openai`, `azure`, `anthropic`, or `fake`. Same as `--provider` |
+| `RECEIPT_RENAMER_MODEL` | Default model when `--model` is omitted. On Azure it's a fallback for `AZURE_OPENAI_DEPLOYMENT` |
+
+A `--provider` / `--model` flag always beats the environment.
 
 ### OpenAI
 
@@ -204,8 +216,17 @@ receipt-renamer watch --input ~/Scans/Inbox
 ```
 
 Uses `watchdog` plus a size/mtime **debounce** (default 2 s, `--debounce`), so a page still
-being written by the feeder is never read half-finished. `--dry-run` works here too. Ctrl-C
-to stop.
+being written by the feeder is never read half-finished. Ctrl-C to stop.
+
+Unlike `run`, `watch` **applies by default** — it exists to be left running, so pass
+`--dry-run` if you just want to see decisions scroll past. It accepts the same
+`--output`, `--in-place`, `--recursive`, `--provider`, `--model`, `--min-confidence`,
+`--max-edge` and `--quality` options as `run`, and files handled during one watch session
+share a single run id, so a later `undo` reverses the whole session.
+
+```bash
+receipt-renamer watch --input ~/Scans/Inbox --provider azure --debounce 5
+```
 
 ### `undo` — reverse the last run
 
@@ -213,10 +234,14 @@ to stop.
 receipt-renamer undo --input ~/Scans/Inbox --dry-run   # preview
 receipt-renamer undo --input ~/Scans/Inbox             # do it
 receipt-renamer undo --input ~/Scans/Inbox --run-id 20240314T101500Z-ab12cd34
+receipt-renamer undo --input ~/Scans/Inbox --ledger /path/to/.receipt-renamer-log.jsonl
 ```
 
 Undo reads the ledger, walks the run backwards, and refuses to overwrite anything that has
-appeared at an original path in the meantime.
+appeared at an original path in the meantime. Each file comes back as `restored`, `missing`
+(it was moved or deleted outside the tool) or `blocked` (something else now occupies the
+original path) — nothing is forced. Undoing the most recent run twice is a no-op: a reversed
+run is marked in the ledger and skipped when resolving "last run".
 
 ## Safety model
 
@@ -230,6 +255,10 @@ appeared at an original path in the meantime.
 - **Filenames are sanitised.** `/ \ : * ? " < > |` and control characters are removed,
   whitespace collapsed, components length-capped, and business names sensibly title-cased
   (`THE HOME DEPOT #4501` → `The Home Depot #4501`, but `IBM` stays `IBM`).
+- **Your receipts stay out of git.** Scans are financial records. `.gitignore` excludes
+  `Renamed/`, `Needs Review/`, `scans/`, `samples/`, and anything matching `*Inbox*/` or
+  `*Receipts*/`, along with `.env` and the ledger. If you keep a working folder inside this
+  repo under a different name, add it to `.gitignore` before your first `git add`.
 
 ## Ledger
 
@@ -246,6 +275,10 @@ folder:
 That is what makes `undo` possible, and it doubles as an audit trail for expense reports.
 Dry runs never write to it.
 
+`provider` and `model` record what actually produced each result, so a mixed batch stays
+traceable. On Azure, `provider` is `azure` and `model` is your **deployment name** — which is
+also why re-running a batch against a different deployment is auditable after the fact.
+
 ## Supported formats
 
 | Format | Status |
@@ -254,6 +287,18 @@ Dry runs never write to it.
 | `.heic` `.heif` | Processed if `pillow-heif` installed, otherwise **skipped with a message** |
 | `.pdf` | First page processed if `pdf2image` + poppler installed, otherwise **skipped** |
 | anything else | Skipped with a clear reason; never touched |
+
+A skipped file is never moved, renamed, or deleted — it just doesn't appear in the results
+table as a rename. PDF support needs the poppler binaries as well as the Python package:
+
+```bash
+brew install poppler          # macOS
+sudo apt install poppler-utils # Debian/Ubuntu
+pip install -e ".[pdf]"
+```
+
+Note the ledger records the extracted **first page** of a PDF under the original `.pdf`
+extension; multi-page PDFs are not split.
 
 ## Cost expectations
 
@@ -273,21 +318,71 @@ throttling shows up as retries rather than errors.
 Always sanity check against your provider's current price list; do a `--dry-run` first if the
 batch is huge.
 
+## Troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| `AZURE_OPENAI_ENDPOINT is not set` | Exported in another shell, or in a `.env` that isn't in your current working directory |
+| Azure `404 DeploymentNotFound` | `--model` / `AZURE_OPENAI_DEPLOYMENT` must be the **deployment name** from the portal, not the model name |
+| Azure `401` / `PermissionDenied` | Wrong key for the resource, or with Entra ID you're missing the *Cognitive Services OpenAI User* role |
+| Azure complains about image content | The deployment isn't a vision model — deploy `gpt-4o-mini` or `gpt-4o` |
+| `Unsupported data type` / unexpected 400 | Pin a newer `AZURE_OPENAI_API_VERSION`; the default is `2024-10-21` |
+| Everything lands in `Needs Review/` | Check the `reason` column. Faded thermal paper often needs `--model gpt-4o` or `--max-edge 2600` |
+| Run is slow on a big batch | Files are processed serially by design. Azure throttling (TPM quota) shows up as retries, not errors |
+| `No ledger found` on `undo` | `undo` reads `<input>/.receipt-renamer-log.jsonl`; point `--input` at the folder you originally ran against, or pass `--ledger` |
+
+Everything except the network call is offline-testable, so reproduce naming or undo
+behaviour with `--provider fake` before blaming the model.
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest          # 104 tests, no network calls
 ```
 
-The suite uses a built-in `FakeProvider` and makes **no network calls**. Try the whole
-workflow without an API key at all:
+### Layout
+
+```
+src/receipt_renamer/
+  cli.py         # typer commands: run / watch / undo, rich output
+  config.py      # Settings, folder resolution, .env loading
+  images.py      # format sniffing, downscale + JPEG re-encode
+  extractor.py   # prep -> provider -> validate -> ReceiptData
+  naming.py      # sanitize, title-case, build stem, collision suffixes
+  ledger.py      # JSONL append, run lookup, undo
+  processor.py   # per-file pipeline; rename vs Needs Review
+  watcher.py     # watchdog handler + write-stability debounce
+  providers/
+    base.py             # VisionProvider protocol, prompt, JSON parsing
+    _openai_common.py   # shared chat-completions request/response plumbing
+    openai_provider.py  # public OpenAI
+    azure_provider.py   # Azure OpenAI (deployments, api-version, Entra ID)
+    anthropic_provider.py
+    fake.py             # offline provider used by tests and demos
+```
+
+`naming.py`, `ledger.py` and `extractor.py`'s validation are pure functions, which is why
+the suite can cover collisions, date handling and undo without touching a model.
+
+### Adding a provider
+
+Implement the `VisionProvider` protocol from `providers/base.py` — a `name`, a `model`, and
+`extract(image_bytes, *, mime_type) -> RawExtraction` — then register it in
+`providers/__init__.py`. Import the SDK **lazily inside `__init__`** so the package still
+installs and tests still run without it. If it speaks the OpenAI chat-completions format,
+reuse `_openai_common.chat_extract` as the Azure provider does.
+
+### Trying it without an API key
 
 ```bash
 receipt-renamer run --input ./samples --provider fake            # dry run
 receipt-renamer run --input ./samples --provider fake --apply
 receipt-renamer undo --input ./samples
 ```
+
+`FakeProvider` returns canned extractions and records its calls, so the full
+rename → ledger → undo path is exercisable offline.
 
 ## License
 
