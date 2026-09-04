@@ -39,7 +39,7 @@ dev = ["pytest>=8.0,<9"]
 receipt-renamer = "receipt_renamer.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/plaudati/receipt-renamer"
+Homepage = "https://github.com/jrzyshr/receipt-renamer"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/receipt_renamer"]

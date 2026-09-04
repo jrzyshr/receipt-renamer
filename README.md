@@ -437,4 +437,4 @@ rename → ledger → undo path is exercisable offline.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
