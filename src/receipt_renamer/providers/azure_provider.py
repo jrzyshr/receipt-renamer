@@ -12,8 +12,11 @@ A key wins when both are available.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 import re
+from collections.abc import Iterator
 
 from ._openai_common import chat_extract
 from .base import ProviderError, RawExtraction
@@ -118,7 +121,11 @@ class AzureOpenAIProvider:
 
 
 def _entra_token_provider():
-    """Build a bearer-token provider using the ambient Azure credential chain."""
+    """Build a bearer-token provider using the ambient Azure credential chain.
+
+    The token is acquired eagerly so an auth problem surfaces at startup rather than
+    part-way through a batch of receipts.
+    """
     try:
         from azure.identity import DefaultAzureCredential, get_bearer_token_provider
     except ImportError as exc:
@@ -127,7 +134,48 @@ def _entra_token_provider():
             "azure-identity. Either set AZURE_OPENAI_API_KEY, or install it with: "
             "pip install 'receipt-renamer[azure-entra]' (then run 'az login')."
         ) from exc
+
     try:
-        return get_bearer_token_provider(DefaultAzureCredential(), ENTRA_SCOPE)
-    except Exception as exc:  # noqa: BLE001 - credential chain failures vary
-        raise ProviderError(f"Could not acquire an Entra ID credential: {exc}") from exc
+        credential = DefaultAzureCredential()
+        provider = get_bearer_token_provider(credential, ENTRA_SCOPE)
+        # azure-identity logs the full credential-chain dump at WARNING; we summarise
+        # it ourselves, so keep the probe quiet and let our message stand.
+        with _quiet_logger("azure.identity"):
+            provider()  # fail fast instead of at the first receipt
+    except Exception as exc:  # noqa: BLE001 - the credential chain raises many types
+        raise ProviderError(
+            f"Could not acquire a Microsoft Entra ID token for {ENTRA_SCOPE}.\n"
+            f"  {_summarize_credential_error(exc)}\n"
+            "\nFix one of the following:\n"
+            f'  1. Re-authenticate for this audience:  az login --scope "{ENTRA_SCOPE}"\n'
+            "  2. Ensure you hold the 'Cognitive Services OpenAI User' role on the "
+            "Azure OpenAI resource.\n"
+            "  3. Or fall back to key auth by setting AZURE_OPENAI_API_KEY."
+        ) from exc
+    return provider
+
+
+@contextlib.contextmanager
+def _quiet_logger(name: str, level: int = logging.ERROR) -> Iterator[None]:
+    """Temporarily raise a logger's threshold, restoring it afterwards."""
+    logger = logging.getLogger(name)
+    previous = logger.level
+    logger.setLevel(level)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
+
+
+def _summarize_credential_error(exc: Exception, *, limit: int = 240) -> str:
+    """Condense DefaultAzureCredential's multi-credential dump to something readable."""
+    text = " ".join(str(exc).split())
+    if not text:
+        return exc.__class__.__name__
+    # Prefer the AAD error code when present; it is the part worth searching for.
+    for token in text.split():
+        if token.startswith("AADSTS"):
+            code = token.rstrip(":.,")
+            head = text[: limit // 2].rstrip()
+            return f"{code} - {head}..." if len(text) > limit // 2 else f"{code} - {text}"
+    return text if len(text) <= limit else text[:limit].rstrip() + "..."

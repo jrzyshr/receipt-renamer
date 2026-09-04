@@ -216,3 +216,40 @@ def test_registry_exposes_azure(stub_azure, monkeypatch: pytest.MonkeyPatch) -> 
     provider = get_provider("azure", "my-deployment")
     assert provider.name == "azure"
     assert provider.model == "my-deployment"
+
+
+def test_entra_token_is_acquired_eagerly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken credential must fail at startup, not part-way through a batch."""
+    import receipt_renamer.providers.azure_provider as mod
+
+    calls: list[str] = []
+
+    def failing_provider() -> str:
+        calls.append("called")
+        raise RuntimeError("AADSTS9002313: Invalid request")
+
+    fake_identity = types.ModuleType("azure.identity")
+    fake_identity.DefaultAzureCredential = lambda *a, **k: object()  # type: ignore[attr-defined]
+    fake_identity.get_bearer_token_provider = lambda *a, **k: failing_provider  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "azure.identity", fake_identity)
+
+    with pytest.raises(ProviderError) as excinfo:
+        mod._entra_token_provider()
+
+    assert calls == ["called"], "token should be requested during construction"
+    message = str(excinfo.value)
+    assert "az login --scope" in message
+    assert "Cognitive Services OpenAI User" in message
+    assert "AADSTS9002313" in message
+    assert "AZURE_OPENAI_API_KEY" in message
+
+
+def test_entra_token_provider_is_returned_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    import receipt_renamer.providers.azure_provider as mod
+
+    fake_identity = types.ModuleType("azure.identity")
+    fake_identity.DefaultAzureCredential = lambda *a, **k: object()  # type: ignore[attr-defined]
+    fake_identity.get_bearer_token_provider = lambda *a, **k: (lambda: "token-abc")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "azure.identity", fake_identity)
+
+    assert mod._entra_token_provider()() == "token-abc"

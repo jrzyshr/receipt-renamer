@@ -107,17 +107,29 @@ before you spend money:
 Scanning /Users/me/Scans/Inbox with azure/receipts-4o-mini @ https://my-resource.openai.azure.com (api-key)
 ```
 
-**Entra ID (keyless) auth.** Leave `AZURE_OPENAI_API_KEY` unset and the tool falls back to
-`DefaultAzureCredential`, which picks up `az login`, a managed identity, or a service
-principal:
+**Entra ID (keyless) auth.** Many Azure OpenAI resources have local key auth disabled, or
+you simply may not have a key. Leave `AZURE_OPENAI_API_KEY` unset and the tool falls back to
+`DefaultAzureCredential`, which picks up the Azure CLI, a managed identity, VS Code, or a
+service principal — no key anywhere:
 
 ```bash
 pip install -e ".[azure-entra]"
-az login
+
+# Sign in FOR THIS AUDIENCE. A plain `az login` is often not enough: an existing
+# session can lack a refresh token for Cognitive Services and fails with AADSTS9002313.
+az login --scope "https://cognitiveservices.azure.com/.default"
+
 receipt-renamer run --input ~/Scans/Inbox --provider azure
 ```
 
-Your identity needs the **Cognitive Services OpenAI User** role on the resource.
+Your identity needs the **Cognitive Services OpenAI User** role on the resource (Owner or
+Contributor on the subscription does *not* imply data-plane access).
+
+The token is acquired **eagerly at startup**, so a credential problem fails immediately with
+a fix-it message rather than part-way through a batch. In CI or on a VM, set the standard
+`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET` service-principal variables, or
+rely on the attached managed identity — `DefaultAzureCredential` finds either without code
+changes.
 
 | Variable | Required | Notes |
 | --- | --- | --- |
@@ -325,6 +337,8 @@ batch is huge.
 | `AZURE_OPENAI_ENDPOINT is not set` | Exported in another shell, or in a `.env` that isn't in your current working directory |
 | Azure `404 DeploymentNotFound` | `--model` / `AZURE_OPENAI_DEPLOYMENT` must be the **deployment name** from the portal, not the model name |
 | Azure `401` / `PermissionDenied` | Wrong key for the resource, or with Entra ID you're missing the *Cognitive Services OpenAI User* role |
+| `AADSTS9002313` at startup | Your CLI session has no token for this audience. Run `az login --scope "https://cognitiveservices.azure.com/.default"` |
+| `Could not acquire a Microsoft Entra ID token` | Not signed in, or `azure-identity` is missing — install `.[azure-entra]` |
 | Azure complains about image content | The deployment isn't a vision model — deploy `gpt-4o-mini` or `gpt-4o` |
 | `Unsupported data type` / unexpected 400 | Pin a newer `AZURE_OPENAI_API_VERSION`; the default is `2024-10-21` |
 | Everything lands in `Needs Review/` | Check the `reason` column. Faded thermal paper often needs `--model gpt-4o` or `--max-edge 2600` |
