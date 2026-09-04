@@ -215,11 +215,45 @@ receipt-renamer run --input ~/Scans/Inbox --model gpt-4o --apply
 | `--dry-run` | on | Explicitly force a dry run |
 | `--in-place` | off | Rename within the input folder |
 | `--recursive, -r` | off | Include subfolders |
+| `--verbose, -v` | off | Print a line for every file, not just problem files |
 | `--provider, -p` | `openai` | `openai`, `azure`, `anthropic`, or `fake` |
 | `--model` | provider default | e.g. `gpt-4o`; for `azure` this is the **deployment name** |
 | `--min-confidence` | `0.7` | Below this → `Needs Review/` |
 | `--max-edge` | `2000` | Downscale long edge (px) before upload |
 | `--quality` | `85` | JPEG quality for the uploaded copy |
+
+### What a run looks like
+
+Receipts are processed **one at a time**, and each one is a network round-trip, so a large
+batch takes a while — roughly 3-5 seconds per receipt, or 10-20 minutes for a 200-file
+folder. The run reports itself as it goes so you can tell work from a hang:
+
+```
+Connected to azure/receipts-4o-mini @ https://my-res.openai.azure.com (entra-id) (dry run)
+Found 227 receipt(s) in /Users/you/Scans  (1 unreadable file(s) ignored)
+needs review  scan_014.jpg → Needs Review/scan_014.jpg  confidence 0.42 is below the 0.70 threshold
+needs review  scan_031.jpg → Needs Review/scan_031.jpg  model could not read: date
+⠹ Reading scan_052.jpg ━━━━━━━━━╸────────────  52/227 0:03:41 0:12:18
+```
+
+Three phases are reported separately: **connecting** to the model (where Entra ID sign-in
+blocks, if it is going to), **finding** receipts, then **reading** them with a live count,
+elapsed time, and estimated time remaining.
+
+Files that need attention are printed the moment they happen, so you never wait until the
+end to discover a problem. Successful renames stay quiet — they are all in the final table
+— unless you pass `--verbose`.
+
+**If several files fail in a row**, the run stops rather than continuing. An expired token
+or a dead endpoint would otherwise file every remaining receipt under `Needs Review/`,
+which looks like hundreds of unreadable scans instead of one outage:
+
+```
+Aborted: stopped after 5 consecutive provider failures: 401 PermissionDenied
+```
+
+**Ctrl-C** is safe. The run stops, prints what it finished, and still reports the run id, so
+anything already moved can be reversed with `undo`.
 
 ### `watch` — process scans as they land
 
@@ -337,6 +371,8 @@ batch is huge.
 | `AZURE_OPENAI_ENDPOINT is not set` | Exported in another shell, or in a `.env` that isn't in your current working directory |
 | Azure `404 DeploymentNotFound` | `--model` / `AZURE_OPENAI_DEPLOYMENT` must be the **deployment name** from the portal, not the model name |
 | Azure `401` / `PermissionDenied` | Wrong key for the resource, or with Entra ID you're missing the *Cognitive Services OpenAI User* role |
+| `run` seems to hang | It is working: check the progress bar's count and ETA. 200+ receipts is normally 10-20 minutes |
+| Run stops with `Aborted: ... consecutive provider failures` | An outage, not bad scans. Check auth/endpoint, then re-run — nothing was overwritten |
 | `AADSTS9002313` at startup | Your CLI session has no token for this audience. Run `az login --scope "https://cognitiveservices.azure.com/.default"` |
 | `Could not acquire a Microsoft Entra ID token` | Not signed in, or `azure-identity` is missing — install `.[azure-entra]` |
 | Azure complains about image content | The deployment isn't a vision model — deploy `gpt-4o-mini` or `gpt-4o` |

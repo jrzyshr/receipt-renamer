@@ -18,6 +18,9 @@ from .providers import VisionProvider
 
 Outcome = Literal["renamed", "needs_review", "skipped"]
 
+#: Consecutive provider failures tolerated before a batch gives up.
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
+
 
 @dataclass(slots=True)
 class FileResult:
@@ -29,6 +32,7 @@ class FileResult:
     data: ReceiptData | None = None
     reason: str | None = None
     applied: bool = False
+    provider_failure: bool = False
 
     @property
     def new_name(self) -> str:
@@ -42,6 +46,11 @@ class RunSummary:
     run_id: str
     results: list[FileResult]
     dry_run: bool
+    aborted_reason: str | None = None
+
+    @property
+    def aborted(self) -> bool:
+        return self.aborted_reason is not None
 
     @property
     def renamed(self) -> int:
@@ -56,17 +65,38 @@ class RunSummary:
         return sum(1 for r in self.results if r.outcome == "skipped")
 
 
-def iter_candidates(settings: Settings) -> Iterator[Path]:
-    """Yield candidate files in the input folder, skipping output folders."""
+def _iter_files(settings: Settings) -> Iterator[Path]:
+    """Yield every real input file, ignoring hidden files and our own output folders."""
     pattern = "**/*" if settings.recursive else "*"
     for path in sorted(settings.input_dir.glob(pattern)):
         if not path.is_file() or path.name.startswith("."):
             continue
         if settings.should_skip(path):
             continue
-        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            continue
         yield path
+
+
+def iter_candidates(settings: Settings) -> Iterator[Path]:
+    """Yield files this tool can actually read."""
+    for path in _iter_files(settings):
+        if path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            yield path
+
+
+def scan_input(settings: Settings) -> tuple[list[Path], list[Path]]:
+    """Split the input folder into processable files and unreadable ones.
+
+    Returning the rejects lets the CLI say up front how many files it is ignoring,
+    rather than leaving the user to wonder why a count looks short.
+    """
+    candidates: list[Path] = []
+    unsupported: list[Path] = []
+    for path in _iter_files(settings):
+        if path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            candidates.append(path)
+        else:
+            unsupported.append(path)
+    return candidates, unsupported
 
 
 def process_file(
@@ -99,7 +129,15 @@ def process_file(
             today=today,
         )
     except ExtractionError as exc:
-        return _to_needs_review(path, str(exc), settings, ledger, run_id, reserved)
+        return _to_needs_review(
+            path,
+            str(exc),
+            settings,
+            ledger,
+            run_id,
+            reserved,
+            provider_failure=exc.provider_failure,
+        )
 
     stem = build_stem(data.date, data.business, data.purpose)
     destination_dir = path.parent if settings.in_place else settings.output_dir
@@ -124,13 +162,18 @@ def _to_needs_review(
     ledger: Ledger | None,
     run_id: str,
     reserved: set[Path],
+    provider_failure: bool = False,
 ) -> FileResult:
     destination = unique_path(
         settings.needs_review_dir, path.stem, normalize_extension(path), reserved=reserved
     )
     reserved.add(destination)
     result = FileResult(
-        original=path, outcome="needs_review", destination=destination, reason=reason
+        original=path,
+        outcome="needs_review",
+        destination=destination,
+        reason=reason,
+        provider_failure=provider_failure,
     )
     if not settings.dry_run:
         result.destination = _move(path, destination)
@@ -184,14 +227,27 @@ def process_paths(
     *,
     ledger: Ledger | None = None,
     run_id: str | None = None,
+    on_file_start: Callable[[Path], None] | None = None,
     on_result: Callable[[FileResult], None] | None = None,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     today: date_cls | None = None,
 ) -> RunSummary:
-    """Process a batch of files, reserving planned names so dry runs stay collision-free."""
+    """Process a batch of files, reserving planned names so dry runs stay collision-free.
+
+    ``on_file_start`` fires before each (slow) extraction so callers can show which file
+    is in flight; ``on_result`` fires once it finishes. If ``max_consecutive_failures``
+    files in a row fail for provider reasons the batch stops early -- an expired token or
+    a dead endpoint would otherwise quietly file every remaining receipt under Needs
+    Review.
+    """
     run_id = run_id or new_run_id()
     reserved: set[Path] = set()
     results: list[FileResult] = []
+    consecutive_failures = 0
+    aborted_reason: str | None = None
     for path in paths:
+        if on_file_start is not None:
+            on_file_start(path)
         result = process_file(
             path,
             provider,
@@ -204,7 +260,23 @@ def process_paths(
         results.append(result)
         if on_result is not None:
             on_result(result)
-    return RunSummary(run_id=run_id, results=results, dry_run=settings.dry_run)
+
+        if result.provider_failure:
+            consecutive_failures += 1
+        else:
+            consecutive_failures = 0
+        if max_consecutive_failures and consecutive_failures >= max_consecutive_failures:
+            aborted_reason = (
+                f"stopped after {consecutive_failures} consecutive provider failures: "
+                f"{results[-1].reason}"
+            )
+            break
+    return RunSummary(
+        run_id=run_id,
+        results=results,
+        dry_run=settings.dry_run,
+        aborted_reason=aborted_reason,
+    )
 
 
 def process_directory(
@@ -212,7 +284,9 @@ def process_directory(
     settings: Settings,
     *,
     ledger: Ledger | None = None,
+    on_file_start: Callable[[Path], None] | None = None,
     on_result: Callable[[FileResult], None] | None = None,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     today: date_cls | None = None,
 ) -> RunSummary:
     """Process every candidate file in ``settings.input_dir``."""
@@ -221,6 +295,8 @@ def process_directory(
         provider,
         settings,
         ledger=ledger,
+        on_file_start=on_file_start,
         on_result=on_result,
+        max_consecutive_failures=max_consecutive_failures,
         today=today,
     )

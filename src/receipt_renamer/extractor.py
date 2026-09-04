@@ -16,7 +16,17 @@ FUTURE_TOLERANCE = timedelta(days=2)
 
 
 class ExtractionError(Exception):
-    """Extraction produced no usable result; the file should go to Needs Review."""
+    """Extraction produced no usable result; the file should go to Needs Review.
+
+    ``provider_failure`` distinguishes an infrastructure problem (auth expired, network
+    down, rate limit) from a receipt the model simply could not read. The first kind
+    will repeat on every remaining file, so callers can stop the batch instead of
+    marking hundreds of good scans as needing review.
+    """
+
+    def __init__(self, message: str, *, provider_failure: bool = False) -> None:
+        super().__init__(message)
+        self.provider_failure = provider_failure
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,8 +107,8 @@ def extract_receipt(
     try:
         raw = provider.extract(prepared.data, mime_type=prepared.mime_type)
     except ProviderError as exc:
-        raise ExtractionError(str(exc)) from exc
+        raise ExtractionError(str(exc), provider_failure=True) from exc
     except Exception as exc:  # noqa: BLE001 - one bad file must not kill the batch
-        raise ExtractionError(f"provider error: {exc}") from exc
+        raise ExtractionError(f"provider error: {exc}", provider_failure=True) from exc
 
     return validate(raw, min_confidence=min_confidence, today=today)

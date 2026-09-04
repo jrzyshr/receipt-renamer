@@ -7,6 +7,15 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 from . import __version__
@@ -19,7 +28,13 @@ from .config import (
 )
 from .images import DEFAULT_JPEG_QUALITY, DEFAULT_MAX_EDGE
 from .ledger import Ledger, new_run_id, undo_run
-from .processor import FileResult, RunSummary, process_directory, process_file
+from .processor import (
+    FileResult,
+    RunSummary,
+    process_file,
+    process_paths,
+    scan_input,
+)
 from .providers import ProviderError, get_provider, resolve_provider_name
 from .watcher import DEFAULT_DEBOUNCE, FolderWatcher
 
@@ -87,8 +102,10 @@ def _build_settings(
 
 
 def _get_provider_or_exit(name: str, model: Optional[str]):
+    """Build the provider, showing progress: this is where Entra ID auth can block."""
     try:
-        return get_provider(name, model)
+        with console.status(f"Connecting to {name}..."):
+            return get_provider(name, model)
     except ProviderError as exc:
         error_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
@@ -118,6 +135,15 @@ def _result_row(result: FileResult) -> tuple[str, str, str, str]:
         target = "-"
         detail = result.reason or ""
     return result.original.name, target, result.outcome.replace("_", " "), detail
+
+
+def _result_line(result: FileResult) -> str:
+    """One compact line describing a finished file, shared by run and watch."""
+    original, target, outcome, detail = _result_row(result)
+    style = _OUTCOME_STYLE.get(result.outcome, "white")
+    arrow = f" → {target}" if target != "-" else ""
+    suffix = f"  [dim]{detail}[/dim]" if detail else ""
+    return f"[{style}]{outcome:>12}[/{style}]  {original}{arrow}{suffix}"
 
 
 def _render_table(results: list[FileResult], *, dry_run: bool) -> None:
@@ -170,6 +196,12 @@ def run(
         False, "--dry-run", help="Explicitly request a dry run (the default behaviour)."
     ),
     recursive: bool = typer.Option(False, "--recursive", "-r", help="Recurse into subfolders."),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Print a line for every file as it is processed, not just problem files.",
+    ),
     in_place: bool = typer.Option(
         False, "--in-place", help="Rename inside the input folder instead of moving to an output folder."
     ),
@@ -211,14 +243,95 @@ def run(
     ledger = None if is_dry_run else Ledger(settings.ledger_path)
 
     console.print(
-        f"Scanning [bold]{settings.input_dir}[/bold] with "
-        + _provider_banner(provider_name, vision)
+        f"Connected to {_provider_banner(provider_name, vision)}"
         + (" [cyan](dry run)[/cyan]" if is_dry_run else "")
     )
-    with console.status("Reading receipts..."):
-        summary = process_directory(vision, settings, ledger=ledger)
+
+    with console.status(f"Finding receipts in {settings.input_dir}..."):
+        candidates, unsupported = scan_input(settings)
+    console.print(
+        f"Found [bold]{len(candidates)}[/bold] receipt(s) in [bold]{settings.input_dir}[/bold]"
+        + (f"  [dim]({len(unsupported)} unreadable file(s) ignored)[/dim]" if unsupported else "")
+    )
+    if not candidates:
+        console.print("[yellow]No supported image files found.[/yellow]")
+        return
+
+    summary = _process_with_progress(
+        candidates, vision, settings, ledger=ledger, verbose=verbose
+    )
     _render_table(summary.results, dry_run=is_dry_run)
     _render_summary(summary, settings)
+    if summary.aborted:
+        error_console.print(f"[red]Aborted:[/red] {summary.aborted_reason}")
+        raise typer.Exit(code=1)
+
+
+def _process_with_progress(
+    candidates: list[Path],
+    vision,
+    settings: Settings,
+    *,
+    ledger: Optional[Ledger],
+    verbose: bool,
+) -> RunSummary:
+    """Run the batch behind a live progress bar, streaming problems as they occur.
+
+    Results are collected through the callback rather than only from the return value so
+    a Ctrl-C still yields a usable (partial) summary -- important when files have already
+    been moved and the user needs the run id to undo them.
+    """
+    run_id = new_run_id()
+    collected: list[FileResult] = []
+    interrupted = False
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Reading receipts", total=len(candidates))
+
+        def on_file_start(path: Path) -> None:
+            progress.update(task, description=f"Reading [bold]{path.name}[/bold]")
+
+        def on_result(result: FileResult) -> None:
+            collected.append(result)
+            progress.advance(task)
+            # Renamed files are already in the final table; only surface what needs
+            # attention, unless the user asked to see everything.
+            if verbose or result.outcome != "renamed":
+                progress.console.print(_result_line(result))
+
+        try:
+            summary = process_paths(
+                candidates,
+                vision,
+                settings,
+                ledger=ledger,
+                run_id=run_id,
+                on_file_start=on_file_start,
+                on_result=on_result,
+            )
+        except KeyboardInterrupt:
+            interrupted = True
+            summary = RunSummary(
+                run_id=run_id,
+                results=collected,
+                dry_run=settings.dry_run,
+                aborted_reason="interrupted by Ctrl-C",
+            )
+        progress.update(task, description="Done")
+
+    if interrupted:
+        console.print(
+            f"\n[yellow]Interrupted[/yellow] after {len(collected)} of {len(candidates)} file(s)."
+        )
+    return summary
 
 
 @app.command()
@@ -272,9 +385,7 @@ def watch(
         result = process_file(
             path, vision, settings, ledger=ledger, run_id=run_id, reserved=reserved
         )
-        original, target, outcome, detail = _result_row(result)
-        style = _OUTCOME_STYLE.get(result.outcome, "white")
-        console.print(f"[{style}]{outcome:>12}[/{style}]  {original} → {target}  {detail}")
+        console.print(_result_line(result))
 
     console.print(
         f"Watching [bold]{settings.input_dir}[/bold] with "
