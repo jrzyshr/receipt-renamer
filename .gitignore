@@ -1,0 +1,36 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Ledgers produced by runs
+.receipt-renamer-log.jsonl
+*.receipt-renamer-log.jsonl
+
+# Scans / working folders
+Renamed/
+Needs Review/
+scans/
+samples/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
