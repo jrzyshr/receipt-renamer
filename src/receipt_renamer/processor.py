@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
+import shutil
+import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date as date_cls
@@ -20,6 +24,15 @@ Outcome = Literal["renamed", "needs_review", "skipped"]
 
 #: Consecutive provider failures tolerated before a batch gives up.
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
+
+#: How many times to attempt a move before giving up on a file.
+MOVE_ATTEMPTS = 3
+#: Base delay between move attempts; doubles each retry.
+MOVE_RETRY_DELAY = 0.25
+
+
+class MoveError(OSError):
+    """A file could not be moved after retries, e.g. it is locked by another process."""
 
 
 @dataclass(slots=True)
@@ -109,7 +122,12 @@ def process_file(
     reserved: set[Path] | None = None,
     today: date_cls | None = None,
 ) -> FileResult:
-    """Process one file end to end. Never raises for a single bad receipt."""
+    """Process one file end to end.
+
+    Never raises for a single bad receipt: extraction failures route to Needs Review, and
+    a file that cannot be moved (locked, read-only) is reported as skipped so the rest of
+    the batch still runs.
+    """
     reserved = reserved if reserved is not None else set()
     run_id = run_id or new_run_id()
 
@@ -149,7 +167,18 @@ def process_file(
     result = FileResult(original=path, outcome="renamed", destination=destination, data=data)
     if not settings.dry_run:
         if destination != path:
-            result.destination = _move(path, destination)
+            try:
+                result.destination = _move(path, destination)
+            except MoveError as exc:
+                # The file is still where it was, so report it and move on rather than
+                # taking the whole batch down with it. Free the name it had claimed so
+                # later files do not skip a number.
+                reserved.discard(destination)
+                result = FileResult(
+                    original=path, outcome="skipped", data=data, reason=str(exc)
+                )
+                _record(ledger, run_id, result, settings)
+                return result
         result.applied = True
     _record(ledger, run_id, result, settings)
     return result
@@ -176,25 +205,69 @@ def _to_needs_review(
         provider_failure=provider_failure,
     )
     if not settings.dry_run:
-        result.destination = _move(path, destination)
+        try:
+            result.destination = _move(path, destination)
+        except MoveError as exc:
+            # Keep the original diagnosis; it is why the file was headed for review.
+            reserved.discard(destination)
+            result = FileResult(
+                original=path,
+                outcome="skipped",
+                reason=f"{reason}; {exc}",
+                provider_failure=provider_failure,
+            )
+            _record(ledger, run_id, result, settings)
+            return result
         result.applied = True
     _record(ledger, run_id, result, settings)
     return result
 
 
-def _move(source: Path, destination: Path) -> Path:
-    """Move a file, never overwriting an existing one. Returns the final path."""
+def _move(
+    source: Path,
+    destination: Path,
+    *,
+    attempts: int | None = None,
+    delay: float | None = None,
+) -> Path:
+    """Move a file, never overwriting an existing one. Returns the final path.
+
+    Transient failures are retried with a backoff: scanners, antivirus, and cloud sync
+    clients all take brief exclusive locks, which is common on Windows and possible
+    anywhere. A lock that outlives the retries raises :class:`MoveError` so the caller
+    can skip one file instead of losing the rest of the batch.
+    """
+    # Read the module constants at call time so tests can shorten the backoff.
+    attempts = MOVE_ATTEMPTS if attempts is None else attempts
+    delay = MOVE_RETRY_DELAY if delay is None else delay
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         destination = unique_path(destination.parent, destination.stem, destination.suffix)
-    try:
-        os.replace(source, destination)
-    except OSError:
-        # Cross-device move (e.g. output on another volume): fall back to copy+unlink.
-        import shutil
 
-        shutil.move(str(source), str(destination))
-    return destination
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return destination
+        except OSError as exc:
+            last_error = exc
+            if exc.errno == errno.EXDEV:
+                # Output folder is on another volume: copy+unlink instead.
+                try:
+                    shutil.move(str(source), str(destination))
+                    return destination
+                except OSError as move_exc:
+                    last_error = move_exc
+                    # A failed copy can leave a partial file behind; do not let it
+                    # masquerade as a completed move.
+                    if source.exists() and destination.exists():
+                        with contextlib.suppress(OSError):
+                            destination.unlink()
+        if attempt < attempts - 1:
+            time.sleep(delay * (2**attempt))
+
+    raise MoveError(f"could not move file: {last_error}")
 
 
 def _record(
