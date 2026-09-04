@@ -90,6 +90,14 @@ def stub_azure(monkeypatch: pytest.MonkeyPatch):
             "?api-version=2024-10-21",
             "https://r.openai.azure.com",
         ),
+        # The newer "v1 API" surface handed out by Azure AI Studio. Left in place the
+        # SDK builds /openai/v1/openai/deployments/... and every call 404s.
+        ("https://r.openai.azure.com/openai/v1", "https://r.openai.azure.com"),
+        ("https://r.openai.azure.com/openai/v1/", "https://r.openai.azure.com"),
+        (
+            "https://r.openai.azure.com/openai/v1/deployments/gpt-4o",
+            "https://r.openai.azure.com",
+        ),
     ],
 )
 def test_endpoint_normalization(raw: str, expected: str) -> None:
@@ -253,3 +261,50 @@ def test_entra_token_provider_is_returned_on_success(monkeypatch: pytest.MonkeyP
     monkeypatch.setitem(sys.modules, "azure.identity", fake_identity)
 
     assert mod._entra_token_provider()() == "token-abc"
+
+
+def test_v1_endpoint_does_not_double_the_api_path(stub_azure) -> None:
+    """Regression: a /openai/v1 endpoint produced a 404 on every receipt."""
+    AzureOpenAIProvider(
+        "gpt-4o-mini",
+        api_key="k",
+        endpoint="https://r.openai.azure.com/openai/v1",
+    )
+    assert stub_azure.instances[-1].init_kwargs["azure_endpoint"] == "https://r.openai.azure.com"
+
+
+def test_404_hint_names_the_likely_causes(stub_azure) -> None:
+    provider = AzureOpenAIProvider(
+        "gpt-4o-mini", api_key="k", endpoint="https://r.openai.azure.com"
+    )
+    hint = provider._hint(Exception("Error code: 404 - {'message': 'Resource not found'}"))
+    assert hint is not None
+    assert "Deployment name" in hint
+    assert "gpt-4o-mini" in hint
+    assert "https://r.openai.azure.com" in hint
+
+
+def test_auth_and_rate_limit_hints(stub_azure) -> None:
+    provider = AzureOpenAIProvider(
+        "gpt-4o-mini", api_key="k", endpoint="https://r.openai.azure.com"
+    )
+    assert "Cognitive Services OpenAI User" in (provider._hint(Exception("401")) or "")
+    assert "quota" in (provider._hint(Exception("429 Too Many Requests")) or "")
+    assert provider._hint(Exception("connection reset")) is None
+
+
+def test_404_hint_reaches_the_user_through_extract(stub_azure, monkeypatch) -> None:
+    """The hint must survive the ProviderError wrapping, not just exist in isolation."""
+    provider = AzureOpenAIProvider(
+        "gpt-4o-mini", api_key="k", endpoint="https://r.openai.azure.com"
+    )
+
+    def boom(**kwargs):
+        raise RuntimeError("Error code: 404 - {'message': 'Resource not found'}")
+
+    monkeypatch.setattr(stub_azure.instances[-1].chat.completions, "create", boom)
+
+    with pytest.raises(ProviderError) as excinfo:
+        provider.extract(b"jpegbytes", mime_type="image/jpeg")
+
+    assert "Deployment name" in str(excinfo.value)

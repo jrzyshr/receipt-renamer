@@ -7,6 +7,7 @@ Chat Completions wire format; only client construction differs.
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from typing import Any
 
 from .base import (
@@ -42,10 +43,12 @@ def chat_extract(
     image_bytes: bytes,
     mime_type: str,
     label: str,
+    hint: Callable[[Exception], str | None] | None = None,
 ) -> RawExtraction:
     """Send one image through a chat-completions client and parse the JSON reply.
 
     ``label`` is used in error messages so the user can tell OpenAI and Azure apart.
+    ``hint`` may turn a specific SDK error into actionable advice.
     """
     try:
         response = client.chat.completions.create(
@@ -55,7 +58,9 @@ def chat_extract(
             messages=build_messages(image_bytes, mime_type),
         )
     except Exception as exc:  # noqa: BLE001 - surface any SDK/transport failure uniformly
-        raise ProviderError(f"{label} request failed: {exc}") from exc
+        message = f"{label} request failed: {exc}"
+        extra = hint(exc) if hint is not None else None
+        raise ProviderError(f"{message}\n{extra}" if extra else message) from exc
 
     text = (response.choices[0].message.content or "") if response.choices else ""
     return build_extraction(

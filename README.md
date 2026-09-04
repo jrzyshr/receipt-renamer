@@ -133,7 +133,7 @@ changes.
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `AZURE_OPENAI_ENDPOINT` | yes | A full request URL pasted from the portal is fine — it gets trimmed back to the resource root |
+| `AZURE_OPENAI_ENDPOINT` | yes | The resource root. A full request URL, a `/openai` path, or the newer `/openai/v1` form are all accepted and trimmed back automatically |
 | `AZURE_OPENAI_DEPLOYMENT` | yes | Or pass `--model <deployment>` |
 | `AZURE_OPENAI_API_KEY` | no | Omit to authenticate with Entra ID |
 | `AZURE_OPENAI_API_VERSION` | no | Defaults to `2024-10-21` |
@@ -371,6 +371,7 @@ batch is huge.
 | `AZURE_OPENAI_ENDPOINT is not set` | Exported in another shell, or in a `.env` that isn't in your current working directory |
 | Azure `404 DeploymentNotFound` | `--model` / `AZURE_OPENAI_DEPLOYMENT` must be the **deployment name** from the portal, not the model name |
 | Azure `401` / `PermissionDenied` | Wrong key for the resource, or with Entra ID you're missing the *Cognitive Services OpenAI User* role |
+| Every file fails with `404 Resource not found` | The request URL is wrong, not your scans. Usually the **deployment name** (`--model` / `AZURE_OPENAI_DEPLOYMENT`) — it's the name you gave the deployment in AI Studio, not the model name. Also check the api-version |
 | `run` seems to hang | It is working: check the progress bar's count and ETA. 200+ receipts is normally 10-20 minutes |
 | Run stops with `Aborted: ... consecutive provider failures` | An outage, not bad scans. Check auth/endpoint, then re-run — nothing was overwritten |
 | `AADSTS9002313` at startup | Your CLI session has no token for this audience. Run `az login --scope "https://cognitiveservices.azure.com/.default"` |

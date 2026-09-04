@@ -27,7 +27,13 @@ DEFAULT_API_VERSION = "2024-10-21"
 #: Scope requested when authenticating with Microsoft Entra ID.
 ENTRA_SCOPE = "https://cognitiveservices.azure.com/.default"
 
-_DEPLOYMENT_PATH_RE = re.compile(r"/openai(/deployments/[^/]+)?/?$", re.IGNORECASE)
+# Trailing API path that AzureOpenAI appends itself. Portal and docs hand out several
+# shapes -- ".../openai", ".../openai/v1" (the newer v1 surface), and full request
+# URLs -- all of which must reduce to the bare resource root or the SDK doubles the
+# path and every call 404s.
+_DEPLOYMENT_PATH_RE = re.compile(
+    r"/openai(?:/v\d+)?(?:/deployments/[^/]+)?/?$", re.IGNORECASE
+)
 
 
 def normalize_endpoint(endpoint: str) -> str:
@@ -117,7 +123,33 @@ class AzureOpenAIProvider:
             image_bytes=image_bytes,
             mime_type=mime_type,
             label="Azure OpenAI",
+            hint=self._hint,
         )
+
+    def _hint(self, exc: Exception) -> str | None:
+        """Turn Azure's opaque status codes into something you can act on."""
+        text = str(exc)
+        if "404" in text or "Resource not found" in text:
+            return (
+                "  A 404 means the request URL is wrong, not that your receipt is bad. Check:\n"
+                f"    - Deployment name (--model / AZURE_OPENAI_DEPLOYMENT) is {self.model!r}; "
+                "it must match the deployment name in Azure AI Studio, which is not "
+                "necessarily the model name.\n"
+                f"    - Endpoint resolved to {self.endpoint} — it should be the resource root.\n"
+                f"    - api-version {self.api_version} is supported by that deployment."
+            )
+        if "401" in text or "PermissionDenied" in text or "403" in text:
+            return (
+                "  Authentication was rejected. With Entra ID you need the "
+                "'Cognitive Services OpenAI User' role on this resource; with a key, check "
+                "AZURE_OPENAI_API_KEY belongs to this endpoint."
+            )
+        if "429" in text:
+            return (
+                "  Rate limited. Your deployment's tokens-per-minute quota is too low for a "
+                "batch this size; raise the quota or run a smaller folder."
+            )
+        return None
 
 
 def _entra_token_provider():
