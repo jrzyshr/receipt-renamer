@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .images import DEFAULT_JPEG_QUALITY, DEFAULT_MAX_EDGE
+from .naming import DEFAULT_NAME_FORMAT, NameFormat, parse_name_format
 
 DEFAULT_OUTPUT_DIRNAME = "Renamed"
 NEEDS_REVIEW_DIRNAME = "Needs Review"
@@ -44,6 +45,7 @@ class Settings:
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     provider_name: str = "openai"
     model: str | None = None
+    name_format: NameFormat = DEFAULT_NAME_FORMAT
     skip_dirs: set[Path] = field(default_factory=set)
 
     @classmethod
@@ -60,6 +62,7 @@ class Settings:
         jpeg_quality: int = DEFAULT_JPEG_QUALITY,
         provider_name: str = "openai",
         model: str | None = None,
+        name_format: NameFormat | str = DEFAULT_NAME_FORMAT,
         ledger_path: Path | None = None,
     ) -> Settings:
         input_dir = Path(input_dir).expanduser().resolve()
@@ -88,6 +91,7 @@ class Settings:
             jpeg_quality=jpeg_quality,
             provider_name=provider_name,
             model=model,
+            name_format=parse_name_format(name_format),
             skip_dirs={resolved_output, needs_review},
         )
 
@@ -100,3 +104,15 @@ class Settings:
 
 def env_provider(default: str = "openai") -> str:
     return os.getenv("RECEIPT_RENAMER_PROVIDER", default)
+
+
+def env_name_format(default: NameFormat = DEFAULT_NAME_FORMAT) -> NameFormat:
+    """Read the default filename format from the environment.
+
+    Raises ``ValueError`` (with the valid choices) when the variable is set to an
+    unknown value, rather than silently falling back.
+    """
+    raw = os.getenv("RECEIPT_RENAMER_NAME_FORMAT")
+    if raw is None or not raw.strip():
+        return default
+    return parse_name_format(raw)

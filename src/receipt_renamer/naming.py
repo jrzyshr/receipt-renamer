@@ -9,6 +9,9 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 # Characters that are illegal (or merely painful) in filenames on Windows/macOS/Linux.
@@ -114,14 +117,111 @@ def clean_purpose(value: str) -> str:
     return title_case_business(sanitize_component(value, max_length=MAX_PURPOSE_LEN))
 
 
-def build_stem(date: str, business: str, purpose: str) -> str:
-    """Build the ``YYYY-MM-DD Business - Purpose`` filename stem."""
-    business = clean_business(business)
-    purpose = clean_purpose(purpose)
-    parts = [p for p in (date.strip(), business) if p]
-    stem = " ".join(parts)
-    if purpose:
-        stem = f"{stem} - {purpose}" if stem else purpose
+class NameFormat(str, Enum):
+    """Supported filename layouts."""
+
+    DATE_FIRST = "date-first"
+    BUSINESS_FIRST = "business-first"
+
+
+@dataclass(frozen=True, slots=True)
+class FormatSpec:
+    """How one :class:`NameFormat` renders: a field template plus a date layout."""
+
+    template: str
+    date_format: str
+    example: str
+
+
+#: Each preset is just data, so supporting user-supplied templates later means
+#: accepting a :class:`FormatSpec` from the caller rather than reworking the renderer.
+FORMAT_SPECS: dict[NameFormat, FormatSpec] = {
+    NameFormat.DATE_FIRST: FormatSpec(
+        template="{date} {business} - {purpose}",
+        date_format="%Y-%m-%d",
+        example="2024-03-14 Blue Bottle Coffee - Meals",
+    ),
+    NameFormat.BUSINESS_FIRST: FormatSpec(
+        template="{business} - {purpose} - {date}",
+        date_format="%m-%d-%Y",
+        example="Blue Bottle Coffee - Meals - 03-14-2024",
+    ),
+}
+
+DEFAULT_NAME_FORMAT = NameFormat.DATE_FIRST
+
+_FIELD_RE = re.compile(r"\{(\w+)\}")
+_ISO_DATE_FORMAT = "%Y-%m-%d"
+
+
+def parse_name_format(value: NameFormat | str | None) -> NameFormat:
+    """Coerce a string to a :class:`NameFormat`, raising ``ValueError`` when unknown."""
+    if value is None:
+        return DEFAULT_NAME_FORMAT
+    if isinstance(value, NameFormat):
+        return value
+    try:
+        return NameFormat(str(value).strip().lower())
+    except ValueError:
+        choices = ", ".join(fmt.value for fmt in NameFormat)
+        raise ValueError(f"unknown name format {value!r} (choose from: {choices})") from None
+
+
+def get_format_spec(value: NameFormat | str | None) -> FormatSpec:
+    """Return the :class:`FormatSpec` for a format name or enum member."""
+    return FORMAT_SPECS[parse_name_format(value)]
+
+
+def render_template(template: str, values: dict[str, str]) -> str:
+    """Fill ``template`` with ``values``, dropping empty fields and their separators.
+
+    A literal separator is only emitted when it sits between two fields that both
+    produced text, so a missing purpose yields ``Business - 03-14-2024`` rather than
+    ``Business -  - 03-14-2024``.
+    """
+    out = ""
+    pending = ""
+    position = 0
+    for match in _FIELD_RE.finditer(template):
+        # Replace rather than accumulate: a skipped field must not leave its separator
+        # behind to double up with the next one.
+        pending = template[position : match.start()]
+        position = match.end()
+        value = values.get(match.group(1), "").strip()
+        if not value:
+            continue
+        if out:
+            out += pending
+        out += value
+    return out
+
+
+def _format_date(value: str, date_format: str) -> str:
+    """Re-render an ISO date, falling back to the raw text when it is not parseable."""
+    text = sanitize_component(value)
+    if not text or date_format == _ISO_DATE_FORMAT:
+        return text
+    try:
+        parsed = datetime.strptime(text, _ISO_DATE_FORMAT).date()
+    except ValueError:
+        return text
+    return parsed.strftime(date_format)
+
+
+def build_stem(
+    date: str,
+    business: str,
+    purpose: str,
+    name_format: NameFormat | str = NameFormat.DATE_FIRST,
+) -> str:
+    """Build a filename stem in the requested :class:`NameFormat`."""
+    spec = get_format_spec(name_format)
+    values = {
+        "date": _format_date(date, spec.date_format),
+        "business": clean_business(business),
+        "purpose": clean_purpose(purpose),
+    }
+    stem = render_template(spec.template, values)
     stem = _WS_RE.sub(" ", stem).strip(" .-_")
     if len(stem) > MAX_STEM_LEN:
         stem = stem[:MAX_STEM_LEN].rstrip(" .-_")
