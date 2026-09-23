@@ -8,10 +8,13 @@ import pytest
 
 from receipt_renamer.naming import (
     MAX_BUSINESS_LEN,
+    NameFormat,
     build_stem,
     clean_business,
     clean_purpose,
     normalize_extension,
+    parse_name_format,
+    render_template,
     sanitize_component,
     unique_path,
 )
@@ -81,6 +84,58 @@ def test_build_stem_never_returns_empty() -> None:
 
 def test_build_stem_avoids_reserved_device_names() -> None:
     assert build_stem("", "con", "") != "Con"
+
+
+def test_build_stem_business_first_format() -> None:
+    assert (
+        build_stem("2024-03-14", "blue bottle coffee", "meals", NameFormat.BUSINESS_FIRST)
+        == "Blue Bottle Coffee - Meals - 03-14-2024"
+    )
+
+
+def test_build_stem_accepts_a_format_name_as_a_string() -> None:
+    assert build_stem("2024-03-14", "acme", "meals", "business-first") == (
+        build_stem("2024-03-14", "acme", "meals", NameFormat.BUSINESS_FIRST)
+    )
+
+
+def test_build_stem_defaults_to_date_first() -> None:
+    assert build_stem("2024-03-14", "acme", "meals").startswith("2024-03-14 ")
+
+
+@pytest.mark.parametrize(
+    ("date", "business", "purpose", "expected"),
+    [
+        ("2024-03-14", "acme", "", "Acme - 03-14-2024"),
+        ("", "acme", "meals", "Acme - Meals"),
+        ("2024-03-14", "", "meals", "Meals - 03-14-2024"),
+        ("2024-03-14", "", "", "03-14-2024"),
+        ("", "", "", "receipt"),
+    ],
+)
+def test_business_first_drops_empty_fields_and_their_separators(
+    date: str, business: str, purpose: str, expected: str
+) -> None:
+    assert build_stem(date, business, purpose, NameFormat.BUSINESS_FIRST) == expected
+
+
+def test_business_first_keeps_an_unparseable_date_verbatim() -> None:
+    assert build_stem("March 14", "acme", "meals", NameFormat.BUSINESS_FIRST) == (
+        "Acme - Meals - March 14"
+    )
+
+
+def test_render_template_omits_missing_fields() -> None:
+    values = {"business": "Acme", "purpose": "", "date": "03-14-2024"}
+    assert render_template("{business} - {purpose} - {date}", values) == "Acme - 03-14-2024"
+
+
+def test_parse_name_format_round_trips_and_rejects_unknown_values() -> None:
+    assert parse_name_format("business-first") is NameFormat.BUSINESS_FIRST
+    assert parse_name_format("  DATE-FIRST  ") is NameFormat.DATE_FIRST
+    assert parse_name_format(None) is NameFormat.DATE_FIRST
+    with pytest.raises(ValueError, match="business-first"):
+        parse_name_format("yyyy-mm-dd")
 
 
 def test_normalize_extension() -> None:

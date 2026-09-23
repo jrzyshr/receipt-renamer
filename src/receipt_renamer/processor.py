@@ -157,7 +157,7 @@ def process_file(
             provider_failure=exc.provider_failure,
         )
 
-    stem = build_stem(data.date, data.business, data.purpose)
+    stem = build_stem(data.date, data.business, data.purpose, settings.name_format)
     destination_dir = path.parent if settings.in_place else settings.output_dir
     destination = unique_path(
         destination_dir, stem, normalize_extension(path), reserved=reserved

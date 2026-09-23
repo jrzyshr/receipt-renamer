@@ -12,6 +12,10 @@ scan_0003.jpg  →  Needs Review/scan_0003.jpg     (unreadable — never guessed
 Every run is **dry by default**, every applied run is written to an append-only ledger, and
 `receipt-renamer undo` puts everything back.
 
+Prefer the business name up front? Pass `--name-format business-first` and the same batch
+becomes `Blue Bottle Coffee - Meals - 03-14-2024.jpg`. See
+[Filename format](#filename-format).
+
 ---
 
 ## Install
@@ -65,6 +69,7 @@ Two variables apply to every provider:
 | --- | --- |
 | `RECEIPT_RENAMER_PROVIDER` | `openai`, `azure`, `anthropic`, or `fake`. Same as `--provider` |
 | `RECEIPT_RENAMER_MODEL` | Default model when `--model` is omitted. On Azure it's a fallback for `AZURE_OPENAI_DEPLOYMENT` |
+| `RECEIPT_RENAMER_NAME_FORMAT` | `date-first` or `business-first`. Same as `--name-format` |
 
 A `--provider` / `--model` flag always beats the environment.
 
@@ -164,6 +169,33 @@ receipt-renamer run --input ~/Scans/Inbox --provider anthropic
 - **Long faded receipts:** if `confidence` keeps landing under the threshold, try
   `--model gpt-4o` for that batch, or raise `--max-edge 2600`.
 
+## Filename format
+
+Two layouts are supported. Pick one with `--name-format`, or set a default once in `.env`
+with `RECEIPT_RENAMER_NAME_FORMAT`. The flag always beats the environment.
+
+| `--name-format` | Result |
+| --- | --- |
+| `date-first` *(default)* | `2024-03-14 Blue Bottle Coffee - Meals.jpg` |
+| `business-first` | `Blue Bottle Coffee - Meals - 03-14-2024.jpg` |
+
+```bash
+receipt-renamer run --input ~/Scans/Inbox --name-format business-first --apply
+```
+
+```dotenv
+# .env — applies to every run and watch
+RECEIPT_RENAMER_NAME_FORMAT=business-first
+```
+
+`date-first` sorts chronologically in any file browser; `business-first` groups a vendor's
+receipts together. Both use the same sanitizing and title-casing rules, and a field the
+model could not read is dropped along with its separator rather than leaving an empty gap —
+a receipt with no purpose becomes `Blue Bottle Coffee - 03-14-2024.jpg`.
+
+The format only affects **new** names. `undo` replays the ledger's recorded paths, so a run
+applied under one format still reverses cleanly after you change the setting.
+
 ## Commands
 
 ### `run` — process a folder once
@@ -205,6 +237,9 @@ receipt-renamer run --input ~/Scans/Inbox --provider azure --apply
 receipt-renamer run --input ~/Scans/Inbox --provider azure --model receipts-4o --apply
 receipt-renamer run --input ~/Scans/Inbox --provider anthropic --apply
 receipt-renamer run --input ~/Scans/Inbox --model gpt-4o --apply
+
+# put the business name first instead of the date
+receipt-renamer run --input ~/Scans/Inbox --name-format business-first --apply
 ```
 
 | Option | Default | Meaning |
@@ -218,6 +253,7 @@ receipt-renamer run --input ~/Scans/Inbox --model gpt-4o --apply
 | `--verbose, -v` | off | Print a line for every file, not just problem files |
 | `--provider, -p` | `openai` | `openai`, `azure`, `anthropic`, or `fake` |
 | `--model` | provider default | e.g. `gpt-4o`; for `azure` this is the **deployment name** |
+| `--name-format` | `date-first` | `date-first` or `business-first` — see [Filename format](#filename-format) |
 | `--min-confidence` | `0.7` | Below this → `Needs Review/` |
 | `--max-edge` | `2000` | Downscale long edge (px) before upload |
 | `--quality` | `85` | JPEG quality for the uploaded copy |
@@ -266,9 +302,9 @@ being written by the feeder is never read half-finished. Ctrl-C to stop.
 
 Unlike `run`, `watch` **applies by default** — it exists to be left running, so pass
 `--dry-run` if you just want to see decisions scroll past. It accepts the same
-`--output`, `--in-place`, `--recursive`, `--provider`, `--model`, `--min-confidence`,
-`--max-edge` and `--quality` options as `run`, and files handled during one watch session
-share a single run id, so a later `undo` reverses the whole session.
+`--output`, `--in-place`, `--recursive`, `--provider`, `--model`, `--name-format`,
+`--min-confidence`, `--max-edge` and `--quality` options as `run`, and files handled during
+one watch session share a single run id, so a later `undo` reverses the whole session.
 
 ```bash
 receipt-renamer watch --input ~/Scans/Inbox --provider azure --debounce 5
@@ -400,7 +436,7 @@ src/receipt_renamer/
   config.py      # Settings, folder resolution, .env loading
   images.py      # format sniffing, downscale + JPEG re-encode
   extractor.py   # prep -> provider -> validate -> ReceiptData
-  naming.py      # sanitize, title-case, build stem, collision suffixes
+  naming.py      # sanitize, title-case, name formats, build stem, collision suffixes
   ledger.py      # JSONL append, run lookup, undo
   processor.py   # per-file pipeline; rename vs Needs Review
   watcher.py     # watchdog handler + write-stability debounce

@@ -23,11 +23,13 @@ from .config import (
     DEFAULT_MIN_CONFIDENCE,
     NEEDS_REVIEW_DIRNAME,
     Settings,
+    env_name_format,
     env_provider,
     load_env,
 )
 from .images import DEFAULT_JPEG_QUALITY, DEFAULT_MAX_EDGE
 from .ledger import Ledger, new_run_id, undo_run
+from .naming import FORMAT_SPECS, NameFormat
 from .processor import (
     FileResult,
     RunSummary,
@@ -47,6 +49,21 @@ console = Console()
 error_console = Console(stderr=True)
 
 _OUTCOME_STYLE = {"renamed": "green", "needs_review": "yellow", "skipped": "dim"}
+
+_NAME_FORMAT_HELP = "Filename layout: " + " | ".join(
+    f"{fmt.value} ({FORMAT_SPECS[fmt].example})" for fmt in NameFormat
+) + " (env: RECEIPT_RENAMER_NAME_FORMAT)."
+
+
+def _resolve_name_format(value: Optional[NameFormat]) -> NameFormat:
+    """CLI flag wins over RECEIPT_RENAMER_NAME_FORMAT, which wins over the default."""
+    if value is not None:
+        return value
+    try:
+        return env_name_format()
+    except ValueError as exc:
+        error_console.print(f"[red]Invalid RECEIPT_RENAMER_NAME_FORMAT:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
 
 
 def _version_callback(value: bool) -> None:
@@ -77,6 +94,7 @@ def _build_settings(
     quality: int,
     provider_name: str,
     model: Optional[str],
+    name_format: NameFormat,
 ) -> Settings:
     if not input_dir.exists() or not input_dir.is_dir():
         error_console.print(f"[red]Input folder does not exist:[/red] {input_dir}")
@@ -98,6 +116,7 @@ def _build_settings(
         jpeg_quality=quality,
         provider_name=provider_name,
         model=model,
+        name_format=name_format,
     )
 
 
@@ -222,10 +241,13 @@ def run(
     max_edge: int = typer.Option(
         DEFAULT_MAX_EDGE, "--max-edge", help="Downscale so the long edge is at most this many pixels."
     ),
-    quality: int = typer.Option(DEFAULT_JPEG_QUALITY, "--quality", help="JPEG quality for uploads."),
+    name_format: Optional[NameFormat] = typer.Option(
+        None, "--name-format", help=_NAME_FORMAT_HELP
+    ),    quality: int = typer.Option(DEFAULT_JPEG_QUALITY, "--quality", help="JPEG quality for uploads."),
 ) -> None:
     """Process a folder of receipts once. Dry run unless you pass --apply."""
     is_dry_run = not apply or dry_run
+    resolved_name_format = _resolve_name_format(name_format)
     provider_name = resolve_provider_name(provider or env_provider())
     settings = _build_settings(
         input_dir.expanduser(),
@@ -238,12 +260,14 @@ def run(
         quality=quality,
         provider_name=provider_name,
         model=model,
+        name_format=resolved_name_format,
     )
     vision = _get_provider_or_exit(provider_name, model)
     ledger = None if is_dry_run else Ledger(settings.ledger_path)
 
     console.print(
         f"Connected to {_provider_banner(provider_name, vision)}"
+        + f" [dim](names: {settings.name_format.value})[/dim]"
         + (" [cyan](dry run)[/cyan]" if is_dry_run else "")
     )
 
@@ -361,8 +385,12 @@ def watch(
     ),
     max_edge: int = typer.Option(DEFAULT_MAX_EDGE, "--max-edge", help="Downscale long edge to this."),
     quality: int = typer.Option(DEFAULT_JPEG_QUALITY, "--quality", help="JPEG quality for uploads."),
+    name_format: Optional[NameFormat] = typer.Option(
+        None, "--name-format", help=_NAME_FORMAT_HELP
+    ),
 ) -> None:
     """Watch a folder and rename scans as they land. Ctrl-C to stop."""
+    resolved_name_format = _resolve_name_format(name_format)
     provider_name = resolve_provider_name(provider or env_provider())
     settings = _build_settings(
         input_dir.expanduser(),
@@ -375,6 +403,7 @@ def watch(
         quality=quality,
         provider_name=provider_name,
         model=model,
+        name_format=resolved_name_format,
     )
     vision = _get_provider_or_exit(provider_name, model)
     ledger = None if dry_run else Ledger(settings.ledger_path)
@@ -391,6 +420,7 @@ def watch(
         f"Watching [bold]{settings.input_dir}[/bold] with "
         + _provider_banner(provider_name, vision)
         + f" [dim]debounce {debounce}s[/dim]"
+        + f" [dim](names: {settings.name_format.value})[/dim]"
         + (" [cyan](dry run)[/cyan]" if dry_run else "")
     )
     console.print("[dim]Press Ctrl-C to stop.[/dim]")

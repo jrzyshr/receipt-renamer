@@ -8,6 +8,8 @@ import pytest
 from typer.testing import CliRunner
 
 from receipt_renamer.cli import app
+from receipt_renamer.config import env_name_format
+from receipt_renamer.naming import NameFormat
 from receipt_renamer.providers import ProviderError, resolve_provider_name
 
 runner = CliRunner()
@@ -84,3 +86,67 @@ def test_missing_api_key_is_a_clean_error(inbox: Path, monkeypatch: pytest.Monke
     result = runner.invoke(app, ["run", "--input", str(inbox), "--provider", "openai"])
     assert result.exit_code == 2
     assert "OPENAI_API_KEY" in result.stdout + str(result.stderr or "")
+
+
+def test_run_honours_the_business_first_name_format(inbox: Path, image_factory) -> None:
+    image_factory(inbox / "scan_0001.jpg")
+    result = runner.invoke(
+        app,
+        ["run", "--input", str(inbox), "--provider", "fake", "--apply",
+         "--name-format", "business-first"],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    renamed = list((inbox / "Renamed").glob("*.jpg"))
+    assert [p.name for p in renamed] == ["Example Cafe - Meals - 01-15-2024.jpg"]
+
+
+def test_name_format_defaults_to_the_env_var(
+    inbox: Path, image_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image_factory(inbox / "scan_0001.jpg")
+    monkeypatch.setenv("RECEIPT_RENAMER_NAME_FORMAT", "business-first")
+    result = runner.invoke(app, ["run", "--input", str(inbox), "--provider", "fake", "--apply"])
+    assert result.exit_code == 0, result.stdout
+
+    renamed = list((inbox / "Renamed").glob("*.jpg"))
+    assert [p.name for p in renamed] == ["Example Cafe - Meals - 01-15-2024.jpg"]
+
+
+def test_name_format_flag_beats_the_env_var(
+    inbox: Path, image_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image_factory(inbox / "scan_0001.jpg")
+    monkeypatch.setenv("RECEIPT_RENAMER_NAME_FORMAT", "business-first")
+    result = runner.invoke(
+        app,
+        ["run", "--input", str(inbox), "--provider", "fake", "--apply",
+         "--name-format", "date-first"],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    renamed = list((inbox / "Renamed").glob("*.jpg"))
+    assert [p.name for p in renamed] == ["2024-01-15 Example Cafe - Meals.jpg"]
+
+
+def test_invalid_env_name_format_is_a_clean_error(
+    inbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RECEIPT_RENAMER_NAME_FORMAT", "yyyy-mm-dd")
+    result = runner.invoke(app, ["run", "--input", str(inbox), "--provider", "fake"])
+    assert result.exit_code == 2
+    assert "RECEIPT_RENAMER_NAME_FORMAT" in result.stdout + str(result.stderr or "")
+
+
+def test_invalid_name_format_flag_is_rejected(inbox: Path) -> None:
+    result = runner.invoke(
+        app, ["run", "--input", str(inbox), "--provider", "fake", "--name-format", "nope"]
+    )
+    assert result.exit_code == 2
+
+
+def test_env_name_format_ignores_a_blank_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RECEIPT_RENAMER_NAME_FORMAT", "   ")
+    assert env_name_format() is NameFormat.DATE_FIRST
+    monkeypatch.delenv("RECEIPT_RENAMER_NAME_FORMAT")
+    assert env_name_format() is NameFormat.DATE_FIRST
